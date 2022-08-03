@@ -1,4 +1,6 @@
 # CPD_BT
+Code for the paper *Detecting Abrupt Changes in Sequential Pairwise Comparison Data*.
+
 To reproduce the experiments:
 
 1. First run data_generation.ipynb to get the data for experiments;
