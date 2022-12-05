@@ -187,7 +187,112 @@ def cp_distance(cp1, cp2):
 
 ########## WBS related functions ##########
 
-##### wbs for bt with likelihood
+######## wbs general
+
+
+
+
+class wbs_cv():
+    def __init__(self, m_intervals, threshold_list, grid_n, smooth = 10, buffer = 10):    
+        """
+        smooth: length of smoothing window for cusum_func
+        buffer: buffer for binary segmentation, when segmenting at bm, search (start, bm - buffer], (bm + buffer, end] 
+        """
+        self.m_intervals = m_intervals
+        self.threshold_list = threshold_list
+        self.smooth = smooth
+        self.buffer = buffer
+        
+        self.grid_n = grid_n
+
+    def cusum_func(self, Y, grid, sm, em, smooth):
+        pass
+    
+    def goodness_of_fit(self, Y_train, Y_test, cp_loc):
+        pass
+
+    def random_intervals(self, n, m):
+        intervals = np.zeros((m, 2))
+        intervals[:,0] = np.random.uniform(1, n - 1, m).astype(int)
+        intervals[:,1] = np.random.uniform(1, n - 1, m).astype(int)
+        for i in range(m):
+            while intervals[i, 0] == intervals[i, 1]:
+                intervals[i, :] = np.random.uniform(1, n - 1, 2).astype(int)
+            intervals[i, :] = sorted(intervals[i, :])
+        return intervals
+
+    def wbs_func(self, Y, grid, threshold):
+        """
+        wbs over the grid
+        """
+        n = len(grid)
+        intervals = self.random_intervals(n, self.m_intervals)
+        n_interval = len(intervals)
+        cp_loc, cp_val = [], []
+        cusum_val = np.zeros(n)
+
+        def wbs_recurs(Y, start, end, intervals, threshold):
+            """
+            recursive binary-segmentation over the grid
+            """
+            nonlocal cp_loc, cp_val, cusum_val, n_interval, grid
+            cand_loc, cand_val = np.zeros(n_interval), np.ones(n_interval) * -1
+            for m in range(n_interval):
+                sm, em = int(max(intervals[m][0], start)), int(min(intervals[m][1], end))
+    #             print(sm)
+    #             print(em)
+                if em - sm > self.buffer:
+                    cusum = self.cusum_func(Y, grid, sm, em, smooth = self.smooth)
+    #                 print("len" + str(len(cusum)))
+                    for t in range(sm, em):
+                        cusum_val[t] = cusum[t - sm]
+    #                 print(np.argmax(cusum))
+                    cand_loc[m] = sm + np.argmax(cusum)
+                    cand_val[m] = cusum_val[int(cand_loc[m])]
+            m_star = np.argmax(cand_val)
+            if cand_val[m_star] > threshold:
+                bm = int(cand_loc[m_star])
+                cp_loc.append(bm)
+                sm, em = int(max(intervals[m_star][0], start)), int(min(intervals[m_star][1], end))
+    #             print("new cp: " + str(bm) + " with cusum " + str(cusum_val[bm]) + " in interval: " + str([sm, em]))
+                wbs_recurs(Y, start, bm - self.buffer, intervals, threshold)
+                wbs_recurs(Y, bm + self.buffer, end, intervals, threshold)
+
+        wbs_recurs(Y, 0, n - 1, intervals, threshold)
+        for loc in cp_loc:
+            cp_val.append(cusum_val[loc])
+        cp_loc = [grid[c] for c in cp_loc]
+        comb = [(x, y) for x, y in zip(cp_loc, cp_val)]
+        comb.sort(key = lambda x: x[0])
+        cp_loc = [x[0] for x in comb]
+        cp_val = [x[1] for x in comb]
+        return cp_loc, cp_val, cusum_val
+    
+    def fit(self, Y_train, Y_test):
+        fit_best = np.infty
+        cp_best = None
+        cp_val_best = None
+        cusum_val_best = None
+        t_best = None
+        
+        n = len(Y_train)
+        step = max(n // self.grid_n, 1)
+        grid = np.arange(0, n, step)
+        
+        for i, threshold in enumerate(self.threshold_list):
+            cp_loc, cp_val, cusum_val = self.wbs_func(Y_train, grid, threshold)
+            fit_cp = self.goodness_of_fit(Y_train, Y_test, cp_loc)
+            if fit_cp < fit_best:
+                fit_best = fit_cp
+                cp_best = cp_loc
+                cp_val_best = cp_val
+                cusum_val_best = cusum_val
+                t_best = threshold
+        return cp_best, cp_val_best, cusum_val_best, t_best, fit_best
+
+
+
+
 
 
 class wbs_cv_covariate():
@@ -286,7 +391,17 @@ class wbs_cv_covariate():
         for loc in cp_loc:
             cp_val.append(cusum_val[loc])
         cp_loc = [grid[c] for c in cp_loc]
+        comb = [(x, y) for x, y in zip(cp_loc, cp_val)]
+        comb.sort(key = lambda x: x[0])
+        cp_loc = [x[0] for x in comb]
+        cp_val = [x[1] for x in comb]
         return cp_loc, cp_val, cusum_val
+
+
+
+
+##### wbs for bt with likelihood
+
 
 
     
@@ -391,6 +506,211 @@ class wbs_cv_bt(wbs_cv_covariate):
                 loss = -loglike_logistic(X_sub, Y_sub, beta)
                 res.append(loss)
         return np.mean(res)
+
+
+
+
+
+
+
+
+######### wbs with borda count as a mean vector
+
+
+class wbs_cv_mean(wbs_cv):
+    def __init__(self, m_intervals, threshold_list, grid_n, smooth = 10, buffer = 10):    
+        """
+        smooth: length of smoothing window for cusum_func
+        buffer: buffer for binary segmentation, when segmenting at bm, search (start, bm - buffer], (bm + buffer, end] 
+        """
+        self.m_intervals = m_intervals
+        self.threshold_list = threshold_list
+        self.smooth = smooth
+        self.buffer = buffer
+        
+        self.grid_n = grid_n
+
+    def cusum_func(self, Y, grid, sm, em, smooth = 1):
+        """
+        Y: T x * array
+
+        cusum_left[i]: summation of Y[grid[sm]],...,Y[grid[i]]
+        cusum_right[i]: summation of Y[grid[i] + 1],...,Y[grid[em]]
+        """
+        y_train = Y[grid[int(sm)]:grid[int(em)] + 1]
+        n = len(Y[0])
+        
+        grid_train = grid[int(sm):int(em) + 1]
+        grid_train = [g - grid_train[0] for g in grid_train]
+        nt = len(grid_train)
+
+        cusum_left, cusum_right = np.zeros((nt, n)), np.zeros((nt, n))
+        cusum_left[0] = np.sum(y_train[:grid_train[0] + 1], axis = 0)
+        cusum_right[nt - 1] = np.sum(y_train[grid_train[nt - 1] + 1:], axis = 0) # can be zero
+
+        if nt < 2 * smooth:
+            return np.zeros(nt)
+
+        diff = np.zeros(nt)
+
+        for i in range(1, nt):
+            lf = np.sum(y_train[grid_train[i - 1] + 1:grid_train[i] + 1], axis = 0)
+            cusum_left[i] = cusum_left[i - 1] + lf
+            rt = np.sum(y_train[grid_train[nt - 1 - i] + 1:grid_train[nt - 1 - (i - 1)] + 1], axis = 0)
+            cusum_right[nt - 1 - i] = cusum_right[nt - 1 - (i - 1)] + rt
+
+        for i in range(smooth, nt - smooth):
+            ss, ee = grid_train[0], grid_train[nt - 1]
+            ii = grid_train[i]
+            diff[i] = np.sum((cusum_left[i] * ((ee - ii) / (ii - ss))**0.5 - 
+                             cusum_right[i] * ((ii - ss) / (ee - ii))**0.5)**2) / (ee - ss)
+
+        for i in range(smooth):
+            diff[i] = diff[smooth]
+            diff[-i-1] = diff[-smooth-1]
+
+        return diff
+
+    def goodness_of_fit(self, Y_train, Y_test, cp_loc):
+        n = len(Y_train)
+        cp_loc = np.concatenate([[0], cp_loc, [n]])
+        cp_loc = cp_loc.astype(int)
+        res = 0
+        for i in range(len(cp_loc) - 1):
+            if cp_loc[i + 1] > cp_loc[i] + 1:
+                Y_sub = Y_train[cp_loc[i]:cp_loc[i + 1]]
+                estimate = np.mean(Y_sub, axis = 0)
+    #             res += loss_func(Y_sub, estimate) + gamma
+                Y_sub = Y_test[cp_loc[i]:cp_loc[i + 1]]
+                res += np.sum((Y_sub - estimate)**2)
+            else:
+    #             res += gamma
+                res += 0
+        return res
+
+
+
+
+######### wbs with the general two-sample testing statistic
+
+class wbs_cv_sst(wbs_cv):
+    def __init__(self, m_intervals, threshold_list, grid_n, smooth = 10, buffer = 10):    
+        """
+        smooth: length of smoothing window for cusum_func
+        buffer: buffer for binary segmentation, when segmenting at bm, search (start, bm - buffer], (bm + buffer, end] 
+        """
+        self.m_intervals = m_intervals
+        self.threshold_list = threshold_list
+        self.smooth = smooth
+        self.buffer = buffer
+        
+        self.grid_n = grid_n
+        
+    def create_game_tensor(self, X, Y, step = 1):
+        nt, n = X.shape[:2]
+        ns = nt // step
+
+        tensor = np.zeros((ns, n, n))
+        for s in range(ns):
+            t_shift = s * step
+            cur = np.zeros((n, n))
+            for t in range(step):
+                if t_shift + t >= nt:
+                    break
+                i, j = np.where(X[t_shift + t])[0]
+                if Y[t_shift + t] == 0:
+                    i, j = j, i
+                cur[i, j] += 1
+
+            tensor[s] = cur.copy()
+        return tensor
+
+    def cusum_func(self, Y, grid, sm, em, smooth = 1):
+        """
+        Y: T x n x n array
+
+        cusum_left[i]: summation of Y[grid[sm]],...,Y[grid[i]]
+        cusum_right[i]: summation of Y[grid[i] + 1],...,Y[grid[em]]
+        """
+        y_train = Y[grid[int(sm)]:grid[int(em)] + 1]
+        n = len(Y[0])
+
+        grid_train = grid[int(sm):int(em) + 1]
+        grid_train = [g - grid_train[0] for g in grid_train]
+        nt = len(grid_train)
+
+        cusum_left, cusum_right = np.zeros((nt, n, n)), np.zeros((nt, n, n))
+        cusum_left[0] = np.sum(y_train[:grid_train[0] + 1], axis = 0)
+        cusum_right[nt - 1] = np.sum(y_train[grid_train[nt - 1] + 1:], axis = 0) # can be zero
+
+        if nt < 2 * smooth:
+            return np.zeros(nt)
+
+        for i in range(1, nt):
+            lf = np.sum(y_train[grid_train[i - 1] + 1:grid_train[i] + 1], axis = 0)
+            cusum_left[i] = cusum_left[i - 1] + lf
+            rt = np.sum(y_train[grid_train[nt - 1 - i] + 1:grid_train[nt - 1 - (i - 1)] + 1], axis = 0)
+            cusum_right[nt - 1 - i] = cusum_right[nt - 1 - (i - 1)] + rt
+
+        #### calculate the T-statistic at each grid point
+        test_path = np.zeros(nt)
+        for i in range(smooth, nt - smooth):
+            X = cusum_left[i]
+            kp = X + X.T
+            Z = cusum_right[i]
+            kq = Z + Z.T
+
+            numerator = kq*(kq-1)*(X**2 - X) + kp*(kp-1)*(Z**2 - Z) - 2 * (kp - 1) * (kq - 1) * X * Z
+            denominator = (kp - 1) * (kq - 1) * (kp + kq)
+            ix = denominator == 0
+            denominator[ix] = 1
+            stat = numerator / denominator
+            stat[ix] = 0
+            test_path[i] = np.sum(stat)
+
+        for i in range(smooth):
+            test_path[i] = test_path[smooth]
+            test_path[-i-1] = test_path[-smooth-1]
+
+        return test_path
+
+    def goodness_of_fit(self, Y_train, Y_test, cp_loc):
+        """
+        TODO: improve the SST estimator
+        
+        """
+        nt = len(Y_train)
+        cp_loc = np.concatenate([[0], cp_loc, [nt]])
+        cp_loc = cp_loc.astype(int)
+        res = []
+        for i in range(len(cp_loc) - 1):
+            if cp_loc[i + 1] > cp_loc[i] + 1:
+                Y_sub = Y_train[cp_loc[i]:cp_loc[i + 1]].sum(axis = 0)
+                # for regularity
+                Y_sub += 0.1
+                k_sub = Y_sub + Y_sub.T
+                ix = k_sub > 1
+                Y_sub = Y_sub[ix]
+                k_sub = k_sub[ix]
+                p_sub = Y_sub / k_sub
+                negloglike_sub = -np.sum(Y_sub * np.log(p_sub))
+#                 pv = p_sub[ix]
+#                 Yv = Y_sub[ix]
+#                 ix = 0 < p_v < 1
+#                 pv = pv[ix]
+#                 Yv = Yv[ix]
+#                 negloglike_sub = np.sum(Yv * np.log(pv))
+                res.append(negloglike_sub)
+
+        return np.sum(res)
+
+
+
+
+
+
+
+
 
 
 
@@ -805,3 +1125,7 @@ class dplr_cv_bt(dplr_cv):
         t = X @ beta
         l = -Y.T @ t + np.sum(np.log(1 + np.exp(t)))
         return l.squeeze()
+
+
+
+
