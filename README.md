@@ -18,5 +18,3 @@ sys.path.append('/content/drive/MyDrive/CPD_BT')
 which can be removed if you want to run them locally.
 
 The folder "application" contains the code and data needed to reproduce the real data analysis.
-
-Notice: For some reason, in this anonymized repository, notebooks do not show normally: they somehow show twice their contents, though this does not affect reading too much. The notebooks downloaded from this repository are correct and ready to use.
